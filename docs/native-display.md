@@ -99,11 +99,43 @@ Ruled out along the way:
   container has `/dev/binder`,`/dev/hwbinder`,`/dev/vndbinder`. The blocker is TLS, not HAL
   availability.
 
-**The real fix** is libhybris-internals work: port the TLS patcher (`hybris/common/tls_patcher.*`)
-to Android 16's bionic — ensure the TLS shadow table is allocated and its base is non-null on
-every thread that executes patched bionic code (notably the non-hybris-created main thread that
-`create-disp` uses for EGL init). This is an **Android-16 port of libhybris** and belongs
-upstream in the Lindroid libhybris fork.
+### The exact fault
+Disassembling **live memory** at the crash (gdb, so the bytes are what actually executes):
+
+```
+      bti  c                      ; a bionic libc function entry
+      mrs  x8, tpidr_el0          ; x8 = the REAL thread pointer (NOT patched to a thunk)
+      ldur x8, [x8, #-8]          ; x8 = *(TP-8) : a bionic per-thread TLS slot  ->  loads 0
+  =>  ldr  x8, [x8, #2080]        ; *(NULL + 0x820)  ->  SIGSEGV   (x8 = 0x0)
+      add  x9, x8, #1             ; (it was about to bump a per-thread counter)
+```
+
+So a bionic libc function reads a per-thread TLS slot at `[TP-8]` and gets **NULL**, because
+`create-disp` runs this on its **glibc main thread**, whose `tpidr_el0` points at glibc's TCB
+— there is no bionic TLS there. The `mrs` was **not** rewritten (no thunk), because Lindroid's
+`create-disp.service` sets **no `HYBRIS_PATCH_TLS`** (the thunk patcher is off by default), and
+even the patcher only handles TLS offsets ≤ `0xFFF` and bails otherwise.
+
+### Is it fixed anywhere? — No (checked GitHub, July 2026)
+* `Linux-on-droid/libhybris`: the thunk-based TLS patcher (`hybris/common/tls_patcher*.c`,
+  commit `75be4aab`, Feb 2025) is the **newest** TLS code on **every** branch
+  (`lindroid-drm`, `new-gbm-surface`, `tmp`, `vk-hacks`, …). Nothing supersedes it.
+* libhybris issue **#559** ("Saving/restoring TLS pointer before/after entering bionic
+  functions", Jul 2024) proposes the *correct* fix — allocate a separate bionic TLS per
+  thread, swap `tpidr_el0` in before each wrapped bionic call and restore it after — but it was
+  **never implemented**. The thunk patcher is a partial alternative and isn't wired into
+  `create-disp`.
+
+**Conclusion:** this is an **open, unsolved problem in libhybris upstream**, not a missing
+config on our side. `create-disp` needs bionic TLS set up on the thread it runs graphics init
+on. The real fixes are, in order of soundness:
+1. Implement issue #559 (per-thread bionic TLS + `tpidr_el0` swap around bionic calls) in the
+   hybris linker — the robust solution, substantial libhybris work.
+2. Make the hybris linker allocate/init bionic static TLS for the calling (glibc) main thread
+   so `[TP-8]` is valid without patching.
+3. Whack-a-mole: `HOOK_TO` every bionic libc function the graphics path calls that touches
+   bionic TLS, redirecting to glibc (same technique as the `__stack_chk_fail` fix in Layer 3).
+   Tractable but open-ended — the TLS-access pattern recurs across many bionic functions.
 
 ## Status & the working alternative
 `create-disp` progresses: kernel EVDI open ✅ → card found/opened ✅ → linker + hooks ✅ →
