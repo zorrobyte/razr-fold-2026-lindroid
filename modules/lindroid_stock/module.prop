@@ -1,0 +1,6 @@
+id=lindroid_stock
+name=Lindroid for stock ROM (blanc)
+version=v0.1
+versionCode=1
+author=zorrobyte + Claude
+description=Lindroid userspace (perspectived, lxc, LindroidUI, HWC composer) overlaid on stock Moto Android 16. Requires Lindroid-enabled kernel (container configs + EVDI).

@@ -1,0 +1,6 @@
+id=services_lindroid
+name=Services Lindroid+DisplayCap patch (blanc W3WBS36.36-48-5-1)
+version=v1.0
+versionCode=1
+author=zorrobyte + Claude
+description=Patched services.jar for razr fold 2026 stock. (1) ReconcilePackageUtils: lets org.lindroid.ui join android.uid.system despite the AOSP test-key signature (enables the Lindroid app on stock). (2) Retains DisplayManagerFlags.isExternalDisplayLimitModeEnabled()->false. Supersedes services_dispcap; disable that one.

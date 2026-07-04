@@ -1,0 +1,35 @@
+diff --git a/hybris/common/hooks.c b/hybris/common/hooks.c
+index eb72edb..300271c 100644
+--- a/hybris/common/hooks.c
++++ b/hybris/common/hooks.c
+@@ -2380,6 +2380,19 @@ __THROW int _hybris_hook___snprintf_chk (char *__restrict __s, size_t __n, int _
+     return ret;
+ }
+ 
++/* Android 16: bionic gralloc libs are stack-protected; under libhybris the
++ * bionic TLS stack-guard slot overlaps glibc TLS so a canary check can
++ * false-positive. Provide a no-op __stack_chk_fail so it doesn't resolve to an
++ * unhooked stub and jump to garbage. Also expose the fortify read/write/vsnprintf
++ * variants (glibc has them). */
++static void _hybris_hook___stack_chk_fail(void)
++{
++}
++
++extern int __vsnprintf_chk(char *, size_t, int, size_t, const char *, __gnuc_va_list);
++extern long __read_chk(int, void *, size_t, size_t);
++extern long __write_chk(int, const void *, size_t, size_t);
++
+ static __attribute__((tls_model ("initial-exec")))
+        __thread void *tls_hooks[16];
+ 
+@@ -2985,6 +2998,10 @@ static struct _hook hooks_common[] = {
+     HOOK_DIRECT_NO_DEBUG(ffs),
+     HOOK_INDIRECT(__sprintf_chk),
+     HOOK_INDIRECT(__snprintf_chk),
++    HOOK_TO(__stack_chk_fail, _hybris_hook___stack_chk_fail),
++    HOOK_TO(__vsnprintf_chk, __vsnprintf_chk),
++    HOOK_TO(__read_chk, __read_chk),
++    HOOK_TO(__write_chk, __write_chk),
+     /* pthread.h */
+     HOOK_DIRECT_NO_DEBUG(getauxval),
+     HOOK_INDIRECT(gettid),
