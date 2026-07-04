@@ -36,6 +36,26 @@ index eb72edb..300271c 100644
 +    return vsnprintf(s, maxlen, format, ap);
 +}
 +
++/* Android 16: bionic thread-local locale accessors deref bionic TLS, which is
++ * NULL on glibc threads (e.g. create-disp's EGL init). Redirect to glibc, which
++ * has all of these. (crash was __ctype_get_mb_cur_max -> ldr [bionic_tls+0x820]) */
++extern unsigned long __ctype_get_mb_cur_max(void);
++extern const unsigned short **__ctype_b_loc(void);
++extern const int **__ctype_tolower_loc(void);
++extern const int **__ctype_toupper_loc(void);
++
++/* Android bionic CFI shadow isn't initialized under the hybris linker, so
++ * __cfi_slowpath derefs a null shadow map (ldrh w8,[x9,x8], x9=__cfi_shadow=NULL).
++ * CFI is a cross-DSO indirect-call security check; no-op it so it's skipped. */
++static void _hybris_hook___cfi_slowpath(uint64_t CallSiteTypeId, void *Ptr)
++{
++    (void) CallSiteTypeId; (void) Ptr;
++}
++static void _hybris_hook___cfi_slowpath_diag(uint64_t CallSiteTypeId, void *Ptr, void *DiagData)
++{
++    (void) CallSiteTypeId; (void) Ptr; (void) DiagData;
++}
++
  static __attribute__((tls_model ("initial-exec")))
         __thread void *tls_hooks[16];
 
@@ -47,6 +67,12 @@ index eb72edb..300271c 100644
 +    HOOK_TO(__vsnprintf_chk, _hybris_hook___vsnprintf_chk),
 +    HOOK_TO(__read_chk, _hybris_hook___read_chk),
 +    HOOK_TO(__write_chk, _hybris_hook___write_chk),
++    HOOK_TO(__ctype_get_mb_cur_max, __ctype_get_mb_cur_max),
++    HOOK_TO(__ctype_b_loc, __ctype_b_loc),
++    HOOK_TO(__ctype_tolower_loc, __ctype_tolower_loc),
++    HOOK_TO(__ctype_toupper_loc, __ctype_toupper_loc),
++    HOOK_TO(__cfi_slowpath, _hybris_hook___cfi_slowpath),
++    HOOK_TO(__cfi_slowpath_diag, _hybris_hook___cfi_slowpath_diag),
      /* pthread.h */
      HOOK_DIRECT_NO_DEBUG(getauxval),
      HOOK_INDIRECT(gettid),

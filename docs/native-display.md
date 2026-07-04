@@ -137,8 +137,44 @@ on. The real fixes are, in order of soundness:
    bionic TLS, redirecting to glibc (same technique as the `__stack_chk_fail` fix in Layer 3).
    Tractable but open-ended — the TLS-access pattern recurs across many bionic functions.
 
-## Status & the working alternative
-`create-disp` progresses: kernel EVDI open ✅ → card found/opened ✅ → linker + hooks ✅ →
-crashes in EGL init on the libhybris/A16 TLS-patcher bug ⏳. Until that's ported, the
-**software VNC desktop** ([`vnc.md`](vnc.md)) is the usable path — it deliberately avoids
-libhybris entirely (pure-software mesa), so it sidesteps this whole class of failure.
+## Update — the crashes ARE fixable (whack-a-mole hooks), and the desktop now RUNS
+
+The "unimplemented upstream" conclusion above was too pessimistic. The bionic-TLS accesses
+that crash `create-disp` are a **small, closed set**, not "all of bionic". Resolving each
+crash PC to a libc symbol (`crashPC − libcbase + fileoff` → `nm -D -n` nearest symbol) and
+hooking that symbol to glibc converged in a few iterations:
+
+* **Locale family** — the first crash was `__ctype_get_mb_cur_max` (reads the thread-local
+  locale via bionic TLS → NULL on a glibc thread). glibc exports the whole family, so
+  `HOOK_TO` them: `__ctype_get_mb_cur_max`, `__ctype_b_loc`, `__ctype_tolower_loc`,
+  `__ctype_toupper_loc`. → `create-disp` stops crashing at that point.
+* **CFI** — next crash was `__cfi_slowpath` (bionic Control Flow Integrity) dereferencing the
+  `__cfi_shadow` map, which the hybris linker never initializes → null deref. No-op
+  `__cfi_slowpath`/`__cfi_slowpath_diag` (CFI is a security check that can't work under
+  libhybris). → `create-disp` runs stably.
+
+All in [`../patches/libhybris/hooks-stack_chk-A16.patch`](../patches/libhybris/hooks-stack_chk-A16.patch).
+
+**kwin** crashed too (GLES render via libhybris/Adreno). Two fixes: set `KWIN_COMPOSE=Q`
+(QPainter software compositing — skips the crashing Adreno GL path) in the SDDM greeter env,
+and fix the greeter's `LD_PRELOAD=/usr/lib/libtls-padding.so` (the rootfs ships it only at
+`/usr/lib/aarch64-linux-gnu/` — symlink it). With these, **the full KDE Plasma session runs**
+(`startplasma-wayland` + `kwin_wayland` + `plasmashell` all alive, verified via `ps`).
+
+## The genuine remaining blocker — EVDI display never connects
+
+With the container desktop running, the last gap is **display lifecycle coordination**, and it
+is NOT yet solved: the EVDI output never actually connects. `/sys/class/drm/card1-Virtual-*/status`
+stays `disconnected` (truly 0 connected — beware `grep connected` also matches *dis*connected),
+and the EVDI plane stays `crtc=(null) fb=0`, so **kwin renders headless and the phone shows
+black.** `create-disp` finds the card (`Found evdi-lindroid at card1`) and no longer crashes,
+but the composer↔create-disp↔kwin handshake that should (a) make the composer request a
+display, (b) have `create-disp` connect an EVDI output at the phone resolution, and (c) have
+kwin hotplug-detect and render to it — does not reliably complete. `create-disp`'s systemd
+service is also unstable (intermittent restarts). This is the "black screen last mile": the
+libhybris/graphics crashes are fixed and the desktop runs, but its frames don't reach the
+screen yet.
+
+## The working alternative
+The **software VNC desktop** ([`vnc.md`](vnc.md)) remains the usable path today — it avoids
+libhybris and the EVDI path entirely.
