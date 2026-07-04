@@ -175,6 +175,36 @@ service is also unstable (intermittent restarts). This is the "black screen last
 libhybris/graphics crashes are fixed and the desktop runs, but its frames don't reach the
 screen yet.
 
+### The true final blocker — the LindroidUI app wedges Android 16's WindowManager
+Tracing the full handoff (create-disp source: `Linux-on-droid/create-disp`; composer:
+`vendor_lindroid/app/app/src/main/cpp/ComposerImpl.cpp`):
+
+1. DisplayActivity SurfaceView → JNI `nativeSurfaceChanged` → `ComposerImpl::onSurfaceChanged`
+   registers a display **with a nativeWindow**.
+2. create-disp connects via libhybris HWC2 → the composer's `registerCallback` hotplugs every
+   display that has a nativeWindow (`onHotplugReceived`).
+3. create-disp's `onHotplugReceived` → `evdi_connect(w,h,…)` → the EVDI connector goes
+   *connected*, kwin renders, and create-disp's poll loop forwards frames back to the SurfaceView.
+
+**It never gets to step 1.** Native `onSurfaceChanged` never fires — verified: the composer
+logs `Starting composer binder service` and create-disp's `registerCallback: sequenceId: 0`,
+but there is never an `onSurfaceChanged: Display:` line. The reason is upstream of everything:
+the **LindroidUI app windows never finish drawing** — `BLASTSyncEngine: Sync group NN timeout`,
+`Unfinished container: …DisplayActivity/LauncherActivity`, `mCurrentFocus=null`. The
+SurfaceView surface never finalizes → no nativeWindow → nothing to hotplug → create-disp waits
+forever → kwin headless → black.
+
+**And it's worse than black:** the stuck BLAST sync escalates to a **WindowManager watchdog
+kill of `system_server`** (verified: `system_server` pid disappears, `dmesg` shows the
+watchdog, a cascade of app `FATAL EXCEPTION`s). So opening the Lindroid display on this stock
+Android 16 build **crash-reboots the phone's UI**. The composer's `nativeStartComposerService`
+ends in `ABinderProcess_joinThreadPool()` (blocks forever — fine only if Java calls it off the
+main thread), and the device runs a **newer LindroidUI apk** (`LauncherActivity`+`DisplayActivity`)
+than the public repo HEAD (`MainActivity`), so the exact Java threading around the SurfaceView
+couldn't be audited. The root is an **Android-16 WindowManager/BLAST incompatibility in the
+LindroidUI app's display path** — a distinct problem from the (now-fixed) libhybris graphics
+crashes, and one that requires app-side (Java + native) work, not container-side.
+
 ## The working alternative
 The **software VNC desktop** ([`vnc.md`](vnc.md)) remains the usable path today — it avoids
-libhybris and the EVDI path entirely.
+libhybris, the EVDI path, *and* the crashing DisplayActivity entirely.
