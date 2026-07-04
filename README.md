@@ -32,11 +32,15 @@ Magisk modules, rebuilding the native libraries against Android 16, and patching
 | A16 native libs (`libjni_lindroidui`, composer, `libhwc2/ui_compat_layer`) | ✅ built via AOSP/Soong |
 | App installs, launches, **creates + starts the Debian container** | ✅ working |
 | **Linux desktop over VNC (software-rendered)** | ✅ **working** — usable today |
-| **Native hardware-accel desktop on the phone screen** | ⏳ blocked on a libhybris/A16 gralloc fix (diagnosed; patch in progress) |
+| libhybris: missing bionic `__stack_chk_fail`/`__*_chk` hooks (A16) | ✅ **fixed** — rebuilt `libhybris-common` in-container; create-disp now reaches EGL init |
+| **Native hardware-accel desktop on the phone screen** | ⏳ root-caused to the libhybris **TLS patcher** vs. A16 bionic (a libhybris port) |
 
 **Bottom line:** the whole stack works end-to-end except the final *hardware-accelerated*
-on-screen path. You get a **usable KDE/XFCE Linux desktop today over VNC**, and the native
-path is down to a single, precisely-diagnosed libhybris incompatibility with Android 16.
+on-screen path. You get a **usable KDE/XFCE Linux desktop today over VNC**. The native path is
+now root-caused to one specific libhybris-internals issue: its 2020-era **TLS patcher** doesn't
+set up the TLS shadow table for Android 16's bionic, so `create-disp` null-derefs a patched
+TLS access during EGL init. Fixing it is an Android-16 port of libhybris — see
+[`docs/native-display.md`](docs/native-display.md).
 
 ---
 
@@ -101,18 +105,27 @@ A16, so the VNC session forces **pure-software mesa** (`__EGL_VENDOR_LIBRARY_FIL
 no xcb). See [`scripts/vnc-desktop.sh`](scripts/vnc-desktop.sh) and
 [`docs/vnc.md`](docs/vnc.md).
 
-### 6. Native display — the remaining blocker (diagnosed)
-With the kernel fix, `create-disp` **finds and opens** the EVDI card, then segfaults inside
-**libhybris** while allocating the display gralloc buffer (`hybris_gralloc_allocate`).
-Root cause: A16's bionic gralloc libs are stack-protected, and Lindroid's libhybris (a
-**2020-era base**) **doesn't hook `__stack_chk_fail`/`__*_chk`** and doesn't keep bionic's
-TLS stack-guard slot intact — so a canary check fires and jumps to an unresolved stub.
-The one-symbol proof: libhybris logs *"Could not find a hook for symbol `__stack_chk_fail`"*.
-The fix (add the missing hooks to `hybris/common/hooks.c` and rebuild libhybris-common) is in
-[`patches/libhybris/hooks-stack_chk-A16.patch`](patches/libhybris/hooks-stack_chk-A16.patch);
-completing it needs the `android-headers` build package (Lindroid's flaky repo). This is
-effectively a **Lindroid-upstream Android-16 port** of libhybris. See
-[`docs/native-display.md`](docs/native-display.md).
+### 6. libhybris — missing bionic fortify/stack-protector hooks (A16) — FIXED
+With the kernel fix, `create-disp` **finds and opens** the EVDI card, then segfaulted inside
+**libhybris**: A16's bionic graphics libs are stack-protected + `_FORTIFY_SOURCE`, and
+Lindroid's 2020-era libhybris didn't hook `__stack_chk_fail`/`__*_chk`, so those imports
+resolved to unhooked stubs → jump to garbage. Proof: *"Could not find a hook for symbol
+`__stack_chk_fail`"*. **Fix:** add the hooks and rebuild `libhybris-common` **in-container**
+([`patches/libhybris/hooks-stack_chk-A16.patch`](patches/libhybris/hooks-stack_chk-A16.patch),
+[`scripts/build-libhybris-common-A16.sh`](scripts/build-libhybris-common-A16.sh)). glibc lacks
+`__write_chk`, so the `_chk`s are local wrappers, not `extern`s. The `android-headers`
+build-dep comes from Halium's repo with `android-version.h` bumped to Android 11 (Lindroid's
+own repo truncates the deb). Verified: crash gone, create-disp reaches EGL init.
+
+### 7. Native display — the remaining blocker (root-caused)
+Past the hooks fix, `create-disp` crashes in **EGL init** at `ldr x8,[x8,#0x820]` with a NULL
+`x8`. That instruction isn't in the on-disk bionic libc — **libhybris rewrote it in memory**:
+its **TLS patcher** turns bionic `mrs tpidr_el0` reads into loads from its own TLS shadow
+table, and the table base is null on create-disp's thread. Root cause: the 2020-era libhybris
+TLS patcher doesn't set up the shadow table for **Android 16's bionic TLS layout**. `HYBRIS_PATCH_TLS`
+and the `libtls-padding` preload don't help — the *table setup* is what's wrong. The device
+does have HIDL/QTI gralloc + binder available (not the blocker). Fixing this is an Android-16
+port of libhybris's TLS patcher. Full evidence in [`docs/native-display.md`](docs/native-display.md).
 
 ---
 

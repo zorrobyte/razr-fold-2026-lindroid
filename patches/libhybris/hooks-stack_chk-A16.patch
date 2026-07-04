@@ -2,10 +2,10 @@ diff --git a/hybris/common/hooks.c b/hybris/common/hooks.c
 index eb72edb..300271c 100644
 --- a/hybris/common/hooks.c
 +++ b/hybris/common/hooks.c
-@@ -2380,6 +2380,19 @@ __THROW int _hybris_hook___snprintf_chk (char *__restrict __s, size_t __n, int _
+@@ -2380,6 +2380,26 @@ __THROW int _hybris_hook___snprintf_chk (char *__restrict __s, size_t __n, int _
      return ret;
  }
- 
+
 +/* Android 16: bionic gralloc libs are stack-protected; under libhybris the
 + * bionic TLS stack-guard slot overlaps glibc TLS so a canary check can
 + * false-positive. Provide a no-op __stack_chk_fail so it doesn't resolve to an
@@ -15,21 +15,38 @@ index eb72edb..300271c 100644
 +{
 +}
 +
-+extern int __vsnprintf_chk(char *, size_t, int, size_t, const char *, __gnuc_va_list);
-+extern long __read_chk(int, void *, size_t, size_t);
-+extern long __write_chk(int, const void *, size_t, size_t);
++static ssize_t _hybris_hook___write_chk(int fd, const void *buf, size_t nbytes, size_t buflen)
++{
++    if (nbytes > buflen)
++        _hybris_hook___stack_chk_fail();
++    return write(fd, buf, nbytes);
++}
++
++static ssize_t _hybris_hook___read_chk(int fd, void *buf, size_t nbytes, size_t buflen)
++{
++    if (nbytes > buflen)
++        _hybris_hook___stack_chk_fail();
++    return read(fd, buf, nbytes);
++}
++
++static int _hybris_hook___vsnprintf_chk(char *s, size_t maxlen, int flag, size_t slen,
++                                        const char *format, va_list ap)
++{
++    (void) flag; (void) slen;
++    return vsnprintf(s, maxlen, format, ap);
++}
 +
  static __attribute__((tls_model ("initial-exec")))
         __thread void *tls_hooks[16];
- 
-@@ -2985,6 +2998,10 @@ static struct _hook hooks_common[] = {
+
+@@ -2985,6 +3005,10 @@ static struct _hook hooks_common[] = {
      HOOK_DIRECT_NO_DEBUG(ffs),
      HOOK_INDIRECT(__sprintf_chk),
      HOOK_INDIRECT(__snprintf_chk),
 +    HOOK_TO(__stack_chk_fail, _hybris_hook___stack_chk_fail),
-+    HOOK_TO(__vsnprintf_chk, __vsnprintf_chk),
-+    HOOK_TO(__read_chk, __read_chk),
-+    HOOK_TO(__write_chk, __write_chk),
++    HOOK_TO(__vsnprintf_chk, _hybris_hook___vsnprintf_chk),
++    HOOK_TO(__read_chk, _hybris_hook___read_chk),
++    HOOK_TO(__write_chk, _hybris_hook___write_chk),
      /* pthread.h */
      HOOK_DIRECT_NO_DEBUG(getauxval),
      HOOK_INDIRECT(gettid),
