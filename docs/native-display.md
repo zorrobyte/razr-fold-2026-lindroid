@@ -295,3 +295,74 @@ connected** ✅ → **kwin render to EVDI ✗ (crashes in hybris EGL/GBM path)**
 ## The working alternative
 The **software VNC desktop** ([`vnc.md`](vnc.md)) remains the usable path today — it avoids
 libhybris, the EVDI/kwin path, and the crashing DisplayActivity entirely.
+
+---
+
+## Update 4 — Corrected architecture (retracts the wayland-server theory)
+
+**The Update 3 root cause above is WRONG.** After cloning the actual upstream repos
+(`Linux-on-droid/{create-disp,lindroid-quirks,libhybris,kwin,lindroid-drm-loopback}`) the picture
+is now verified from source. Correcting the record:
+
+### The `android_wlegl` wayland path is DEAD CODE
+`lindroid_drmws_CreateWindow` / `WaylandNativeWindow` / `wl_display_connect` in
+`eglplatform_lindroid_drm.cpp` are **vestigial**, carried over from the `wayland` platform this was
+forked from. **Nothing runs an `android_wlegl` wayland server**, and one is not needed. My Update-3
+reproducer crashed there only because it *explicitly* called `eglCreateWindowSurface` — it drove the
+dead path by hand. The real kwin backtrace was never actually captured (KCrash double-faulted), so
+Update 3 built on an unverified assumption.
+
+### The real pixel path (EVDI GBM broker + create-disp HWC2)
+1. `create-disp` (systemd, `Before=display-manager`) opens the EVDI card, `DRM_IOCTL_EVDI_CONNECT`s
+   a virtual display sized to the Android panel's active HWC2 config, registers HWC2
+   vsync/hotplug/refresh callbacks, and loops on `DRM_IOCTL_EVDI_POLL`.
+2. kwin runs its **DRM backend** on `KWIN_DRM_DEVICES=/dev/dri/by-path/platform-evdi-lindroid.0-card`
+   with `GBM_BACKEND=hybris` + `EGL_PLATFORM=lindroid-drm` + `KWIN_COMPOSE=O2ES`.
+3. kwin allocates GBM bo's on the EVDI card. EVDI's `GBM_CREATE_BUFF` ioctl fires a `create_buf`
+   poll event → create-disp backs each with a **real Android gralloc buffer** (`hybris_gralloc_allocate`).
+4. kwin renders with the host GPU (Android EGL via libhybris) into those buffers. Client textures are
+   imported via `lindroid_drmws_passthroughImageKHR` — an `EGL_LINUX_DMA_BUF_EXT` import that reads a
+   custom EVDI metadata fd header `[evdi_buff_id, version, numFds, numInts]` and resolves the gralloc
+   handle (`DRM_IOCTL_EVDI_GBM_GET_BUFF` → `hybris_gralloc_import_buffer`).
+5. kwin page-flips on the EVDI card → EVDI emits a `swap_to` event → create-disp wraps the gralloc
+   handle in a `RemoteWindowBuffer` and **HWC2-presents** it (`hwc2_compat_display_set_client_target`
+   + present) to Android's composer → physical screen.
+
+`create-disp` is **not** a wayland server — its only deps are `hybris/gralloc`, `hybris/hwc2`,
+`windowbuffer.h`, `xf86drm.h`, `libsystemd`.
+
+### Canonical session config (upstream `lindroid-quirks`, branch `lindroid`)
+```sh
+# etc/profile.d/kwin-lindroid-hacks.sh
+export KWIN_COMPOSE=O2ES                 # OpenGL ES 2 — NOT Q (QPainter)
+export GBM_BACKEND=hybris
+export __GLX_VENDOR_LIBRARY_NAME=libhybris
+export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_libhybris.json
+export KWIN_DRM_DEVICES=/dev/dri/by-path/platform-evdi-lindroid.0-card
+export EGL_PLATFORM=lindroid-drm
+# etc/profile.d/ld_preload_tls_padding.sh
+export HYBRIS_PATCH_TLS=1                 # + LD_PRELOAD=/usr/lib/libtls-padding.so (sddm GreeterEnvironment)
+```
+
+### kwin: stock 6.3.6, NOT the fork
+- The container ships **stock Debian kwin 6.3.6** (`Source: kwin`, `Maintainer: Debian Qt/KDE`).
+  Zero lindroid/evdi strings in `kwin_wayland.real`/`libkwin.so.6`.
+- The `Linux-on-droid/kwin` fork (branch `lindroid`) is **kwin 5.27.11** and its commits are a
+  resurrected **hwcomposer backend** (kwin → HWC2 directly, *no* EVDI) — an older/alternate
+  architecture, and Qt5/KF5 (incompatible with the 6.3.6 container). So the fork is **not** the fix
+  for the EVDI/DRM-backend path.
+
+### Open crux (unresolved when device was torn down)
+kwin 6.3.6's `GbmSurface::createSurface` calls
+`eglCreatePlatformWindowSurfaceEXT(eglDisplay, config, gbm_surface, nullptr)`. Whether libhybris
+routes that into the dead `lindroid_drmws_CreateWindow` (→ crash) or `libgbm-hybris` unwraps the
+gbm_surface to the underlying Android native window (→ works) is the remaining question. Resolving it
+requires the **real** kwin DRM-backend backtrace on device with the canonical config and KCrash
+disabled (core lands in `/tmp/cores` via the `kwin_wayland` wrapper). That was the immediate next
+step before the containers were deleted.
+
+### Verified fallback
+Pure **mesa software GL** (`kms_swrast`/`llvmpipe`) renders fine on the EVDI card — `GL_VERSION =
+OpenGL ES 3.2 Mesa 25.0.7`, `eglMakeCurrent=1`, no crash. Not the hardware-accelerated intended path,
+but a proven software route if the hybris EGL/GBM crux can't be closed. (The `KWIN_COMPOSE=Q` + mesa
+experiment made kwin's QPA fail to init; that was a detour — the canonical path is `O2ES` + hybris.)
