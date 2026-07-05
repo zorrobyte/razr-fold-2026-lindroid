@@ -254,6 +254,39 @@ present, and `strace -k` had no unwinder. The next step is to instrument **libgb
 hybris EGL GBM platform** (or run on a device where core dumps work) to catch the SIGSEGV → the
 missing libhybris function then becomes another `HOOK_TO`, exactly like the locale/CFI fixes.
 
+## Update 3 — EXACT crash caught via a minimal reproducer (cores DO work)
+
+Core dumps actually work in the container (`CONFIG_COREDUMP=y`; a test crasher dumped fine).
+kwin didn't dump only because KCrash double-faults and its `RLIMIT_CORE` was 0. Rather than fight
+KCrash, a **~40-line reproducer** doing exactly what kwin's DRM backend does (`gbm_create_device`
+→ `eglGetPlatformDisplay` → `eglInitialize` → `eglChooseConfig` → `eglCreateContext` →
+`gbm_surface_create` → `eglCreateWindowSurface`), run under gdb, gives the exact backtrace:
+
+```
+#0 pthread_mutex_lock                                   libc.so.6   (bad mutex ptr)
+#1 wl_proxy_create_wrapper                              libwayland-client.so.0
+#2 WaylandNativeWindow::WaylandNativeWindow(wl_egl_window*, wl_display*, android_wlegl*)
+                                                        eglplatform_lindroid-drm.so
+#3 lindroid_drmws_CreateWindow                          eglplatform_lindroid-drm.so
+#4 eglCreateWindowSurface                               libEGL_libhybris.so.0
+```
+
+Everything through `gbm_surface_create` succeeds (`eglInitialize=1 ver=1.5`); the crash is in
+**`eglCreateWindowSurface`**.
+
+**Root cause** (platform source `hybris/egl/platforms/lindroid_drm/eglplatform_lindroid_drm.cpp`):
+the `lindroid_drm` EGL platform is a **wayland** platform. `lindroid_drmws_GetDisplay` does
+`wdpy->wl_dpy = (wl_display*)nativeDisplay; if (!wl_dpy) wl_dpy = wl_display_connect(NULL);` and
+`lindroid_drmws_CreateWindow` builds a `WaylandNativeWindow(wl_egl_window*, wl_dpy, android_wlegl*)`
+— it bridges container GL buffers to the Android composer over the **`android_wlegl`** wayland
+protocol. But kwin's **DRM backend passes a GBM device** as the native display, which the platform
+casts to `wl_display*` and dereferences → `wl_proxy_create_wrapper` locks a garbage mutex → SIGSEGV.
+So the DRM/GBM backend and the wayland-based `lindroid-drm` EGL platform are **mismatched**: the
+platform needs a real `wl_display` from a wayland server providing `android_wlegl`. Fix direction:
+run kwin's **wayland backend** (which passes a real `wl_display`) against that server, or ensure the
+`android_wlegl` wayland server is reachable via `WAYLAND_DISPLAY` so `wl_display_connect` succeeds.
+This — not another libhybris hook — is the real remaining work; the graphics stack itself is fine.
+
 ## Status ladder
 kernel EVDI open ✅ → libhybris crashes (locale/CFI/stack) ✅ → container Plasma runs ✅ →
 unfold so the app draws ✅ → onSurfaceChanged ✅ → create-disp evdi_connect / **Virtual-3
