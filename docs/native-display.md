@@ -205,6 +205,50 @@ couldn't be audited. The root is an **Android-16 WindowManager/BLAST incompatibi
 LindroidUI app's display path** — a distinct problem from the (now-fixed) libhybris graphics
 crashes, and one that requires app-side (Java + native) work, not container-side.
 
+## Update 2 — the BLAST wedge is the FOLD STATE, and the display pipeline works
+
+Two big findings on a test device:
+
+**1. The DisplayActivity BLAST wedge only happens folded-closed.** With the phone **unfolded**
+(main inner display active, `device_state=OPENED`), the LindroidUI windows draw normally
+(`mCurrentFocus=…DisplayActivity`, no `Sync group timeout`), and native
+`ComposerImpl::onSurfaceChanged` **fires** (`Display: 0, 2232x2368`). Folded-closed (cover
+display) it wedges → watchdog → `system_server` crash-loop (needs a sysrq reboot to recover).
+So: **keep it unfolded.** This was the real cause of the "app crashes the phone" behaviour.
+
+**2. The full display-connection pipeline WORKS.** Unfolded, the entire chain completes:
+`onSurfaceChanged` → composer registers a display with a `nativeWindow` → create-disp
+`registerCallback` → composer `onHotplugReceived` → create-disp `evdi_connect(2232,2368)` →
+**`/sys/class/drm/card1-Virtual-3/status = connected`** (verified with `[ "$s" = connected ]`,
+not the substring-buggy `grep`). The EVDI output connects at the inner-display resolution. This
+is the "black screen last mile" (task #8) coordination — **solved up to the connection.**
+Timing matters: create-disp must `registerCallback` while the DisplayActivity surface is live.
+
+## The genuine final blocker — kwin crashes rendering to the EVDI output
+
+With Virtual-3 connected, kwin still won't drive it: `enabled=disabled`, `evdi plane fb=0`,
+`crtc=(null)`, and kwin is **not DRM master** (`master=n`) even though card1 is correctly
+seat0-tagged (`master-of-seat`) and `udevd` is running. The kwin journal shows it initializes
+fine — `Compositing forced to QPainter mode`, `QPainter compositing successfully initialized`,
+effects load — then **`KCrash: kwin_wayland crashing`**. So kwin **crashes** during DRM-output
+enablement / first present. Crucially, even in QPainter (software) mode kwin logs
+`Forcing EGL native interface as Qt uses OpenGL ES` — it still initializes the **hybris EGL/GBM
+on the EVDI render node** (`renderD129`, `GBM_BACKEND=hybris`), and that path — which
+`create-disp` does *not* exercise (create-disp uses the HWC2 compat path) — is almost certainly
+where it dies, on a libhybris function not covered by the Layer-3 hooks.
+
+**Could not obtain a backtrace** to pin the function: this container can't write core dumps
+(Android kernel `core_pattern`), gdb-wrapping `kwin_wayland` breaks the session's `--wayland-fd`
+passing, `KCrash` double-faults (`crashRecursionCounter=2`) before dumping frames, `wayland-info`
+hangs, and glibc `libSegFault.so` isn't present. Fixing this needs a backtrace of the kwin
+EGL/GBM-on-EVDI crash (obtainable on a device where core dumps work, or by instrumenting
+libhybris) → then the missing symbol becomes another `HOOK_TO` like the locale/CFI ones.
+
+## Status ladder
+kernel EVDI open ✅ → libhybris crashes (locale/CFI/stack) ✅ → container Plasma runs ✅ →
+unfold so the app draws ✅ → onSurfaceChanged ✅ → create-disp evdi_connect / **Virtual-3
+connected** ✅ → **kwin render to EVDI ✗ (crashes in hybris EGL/GBM path)**.
+
 ## The working alternative
 The **software VNC desktop** ([`vnc.md`](vnc.md)) remains the usable path today — it avoids
-libhybris, the EVDI path, *and* the crashing DisplayActivity entirely.
+libhybris, the EVDI/kwin path, and the crashing DisplayActivity entirely.
