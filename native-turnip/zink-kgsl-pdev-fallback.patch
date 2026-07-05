@@ -1,0 +1,34 @@
+From: razr-fold-2026-lindroid
+Subject: [PATCH] zink: fall back to first device when no DRM node matches (KGSL/turnip)
+
+zink_get_display_device() picks the Vulkan physical device by matching the
+display's DRM render node (renderMajor/renderMinor from VK_EXT_physical_device_drm).
+Turnip on Qualcomm KGSL has NO DRM render node (KGSL is a char device, not DRM),
+so it never populates drmProperties and the match always fails -> "ZINK: failed
+to choose pdev" -> zink refuses to run. This also breaks EGL surfaceless, because
+Mesa's surfaceless platform probes a render node whose major (226, the EVDI/msm_drm
+DPU) never matches the Adreno.
+
+On this platform the render GPU (Adreno, via KGSL) is legitimately a *different*
+device from the scanout device (EVDI / msm_drm DPU), so falling back to the first
+enumerated device is correct: it selects turnip.
+
+Apply to Mesa (tested on Mesa main 26.2.0-devel, git-58513e4bb7):
+  src/gallium/drivers/zink/zink_screen.c
+
+--- a/src/gallium/drivers/zink/zink_screen.c
++++ b/src/gallium/drivers/zink/zink_screen.c
+@@ zink_get_display_device
+    for (uint32_t i = 0; i < pdev_count; ++i) {
+       VKSCR(GetPhysicalDeviceProperties2)(pdevs[i], &props);
+       if (drm_props.renderMajor == dev_major &&
+           drm_props.renderMinor == dev_minor)
+          return i;
+    }
+
+-   return -1;
++   /* KGSL/turnip exposes no DRM render node (renderMajor==0), so the display
++    * match never succeeds. Fall back to the first device: on Adreno-KGSL the
++    * render GPU is legitimately distinct from the (EVDI) scanout device. */
++   return pdev_count ? 0 : -1;
+ }

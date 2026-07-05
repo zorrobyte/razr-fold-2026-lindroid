@@ -34,6 +34,8 @@ Magisk modules, rebuilding the native libraries against Android 16, and patching
 | **Linux desktop over VNC (software-rendered)** | ✅ **working** — usable today |
 | libhybris: missing bionic `__stack_chk_fail`/`__*_chk` hooks (A16) | ✅ **fixed** — rebuilt `libhybris-common` in-container; create-disp now reaches EGL init |
 | **Native hardware-accel desktop on the phone screen** | ⏳ root-caused to the libhybris **TLS patcher** vs. A16 bionic (a libhybris port) |
+| **GPU without libhybris** — Turnip/freedreno on stock KGSL | ✅ **proven** — see [`docs/native-turnip.md`](docs/native-turnip.md): turnip drives the Adreno 829 over `/dev/kgsl-3d0`, GLES 3.2 via zink→turnip, native (libhybris-free) present bridge posts real frames to SurfaceFlinger |
+| Visible GPU desktop (Plasma/sway) via the native path | ❌ blocked — Motorola Ready For owns the panel + brand-new Adreno-8xx rough edges in the Mesa compositor GL path |
 
 **Bottom line:** the whole stack works end-to-end except the final *hardware-accelerated*
 on-screen path. You get a **usable KDE/XFCE Linux desktop today over VNC**. The native path is
@@ -41,6 +43,14 @@ now root-caused to one specific libhybris-internals issue: its 2020-era **TLS pa
 set up the TLS shadow table for Android 16's bionic, so `create-disp` null-derefs a patched
 TLS access during EGL init. Fixing it is an Android-16 port of libhybris — see
 [`docs/native-display.md`](docs/native-display.md).
+
+**Alternative that sidesteps libhybris entirely:** render with **upstream Mesa —
+Turnip/freedreno talking straight to the stock KGSL device** (`/dev/kgsl-3d0`), no Android GPU
+blob. This is **proven working** (turnip enumerates + renders on the Adreno 829, GLES 3.2 via
+zink→turnip, and a native libhybris-free bridge posts frames to SurfaceFlinger) — see
+[`docs/native-turnip.md`](docs/native-turnip.md) and [`native-turnip/`](native-turnip/). A fully
+*visible* desktop is still blocked, but by different, non-libhybris things (Motorola Ready For
+owning the panel; brand-new Adreno-8xx rough edges in Mesa's compositor GL path).
 
 ---
 
